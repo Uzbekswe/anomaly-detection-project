@@ -16,7 +16,6 @@ import joblib
 import numpy as np
 import pandas as pd
 import torch
-from mlflow.tracking import MlflowClient
 
 from src.features.engineer import MinMaxScaler, StandardScaler
 from src.models.isolation_forest import IsolationForestAnomalyDetector
@@ -157,6 +156,8 @@ def load_model_from_run(run_id: str) -> Model:
     The run must have been produced by ``src.models.train`` which logs
     scaler.json and the model checkpoint / joblib artifact.
     """
+    from mlflow.tracking import MlflowClient
+
     client = MlflowClient()
     run = client.get_run(run_id)
     model_type = run.data.tags.get("model_type", "unknown")
@@ -206,6 +207,8 @@ def load_model_from_run(run_id: str) -> Model:
 
 def find_latest_run_id(model_name: str, model_stage: str) -> str:
     """Find the latest MLflow model-registry run ID for a given name/stage."""
+    from mlflow.tracking import MlflowClient
+
     client = MlflowClient()
     try:
         latest = client.get_latest_versions(name=model_name, stages=[model_stage])[0]
