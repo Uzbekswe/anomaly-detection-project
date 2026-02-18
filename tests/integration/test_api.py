@@ -15,6 +15,7 @@ from fastapi.responses import JSONResponse
 from httpx import ASGITransport, AsyncClient
 
 from src.serving.middleware import RequestLoggingMiddleware, TimingMiddleware
+from src.serving.predictor import AnomalyPredictor
 from src.serving.router import router, set_predictor
 
 # ──────────────────────────────────────────────
@@ -30,11 +31,23 @@ def _make_mock_predictor(
     confidence: float = 0.88,
     model_version: str = "lstm_autoencoder_test_v1",
 ) -> MagicMock:
-    """Create a mock AnomalyPredictor with configurable return values."""
-    mock = MagicMock()
+    """Create a mock AnomalyPredictor with a mocked Model container."""
+    mock = MagicMock(spec=AnomalyPredictor)
     mock.is_loaded = is_loaded
-    mock.model_version = model_version
-    mock.predict.return_value = (anomaly_score, is_anomaly, confidence)
+
+    if is_loaded:
+        mock_model_container = MagicMock()
+        mock_model_container.model_version = model_version
+        mock.model_container = mock_model_container
+        mock.predict.return_value = {
+            "anomaly_score": anomaly_score,
+            "is_anomaly": is_anomaly,
+            "confidence": confidence,
+            "model_version": model_version,
+        }
+    else:
+        mock.model_container = None
+
     return mock
 
 
@@ -47,15 +60,10 @@ def _valid_detect_payload() -> dict:
     }
 
 
-def _build_test_app(predictor_mock: MagicMock) -> FastAPI:
-    """Build a minimal FastAPI app for testing with the given mock predictor."""
-
-    @asynccontextmanager
-    async def lifespan(app: FastAPI):
-        set_predictor(predictor_mock)
-        yield
-
-    app = FastAPI(title="Test App", lifespan=lifespan)
+def _build_test_app(config: dict) -> FastAPI:
+    """Build a minimal FastAPI app for testing."""
+    app = FastAPI(title="Test App")
+    app.state.config = config
     app.add_middleware(TimingMiddleware)
     app.add_middleware(RequestLoggingMiddleware)
 
@@ -88,10 +96,15 @@ def unloaded_predictor() -> MagicMock:
 
 
 @pytest.fixture
-async def client(mock_predictor: MagicMock) -> AsyncClient:
+def mock_config() -> dict:
+    """A mock of the serving config."""
+    return {"batch": {"max_batch_size": 100}, "database": {}}
+
+
+@pytest.fixture
+async def client(mock_predictor: MagicMock, mock_config: dict) -> AsyncClient:
     """Async httpx client for the app with a loaded model."""
-    app = _build_test_app(mock_predictor)
-    # Set predictor directly (ASGITransport may not trigger lifespan)
+    app = _build_test_app(mock_config)
     set_predictor(mock_predictor)
     transport = ASGITransport(app=app)
     with patch("src.serving.router.store_anomaly_event"), \
@@ -101,9 +114,9 @@ async def client(mock_predictor: MagicMock) -> AsyncClient:
 
 
 @pytest.fixture
-async def client_no_model(unloaded_predictor: MagicMock) -> AsyncClient:
+async def client_no_model(unloaded_predictor: MagicMock, mock_config: dict) -> AsyncClient:
     """Async httpx client for the app without a loaded model."""
-    app = _build_test_app(unloaded_predictor)
+    app = _build_test_app(mock_config)
     set_predictor(unloaded_predictor)
     transport = ASGITransport(app=app)
     with patch("src.serving.router.store_anomaly_event"), \
@@ -167,7 +180,7 @@ class TestDetectEndpoint:
         assert body["processing_time_ms"] >= 0
 
         # Verify predictor was called with the window data
-        mock_predictor.predict.assert_called_once()
+        mock_predictor.predict.assert_called_once_with(payload["window"])
 
     @pytest.mark.asyncio
     async def test_detect_response_matches_schema(self, client: AsyncClient) -> None:
@@ -335,6 +348,8 @@ class TestBatchDetectEndpoint:
         # Verify sensor_ids are echoed in order
         for i, result in enumerate(body["results"]):
             assert result["sensor_id"] == f"engine_{i:03d}"
+        
+        assert mock_predictor.predict.call_count == 3
 
     @pytest.mark.asyncio
     async def test_batch_response_matches_schema(self, client: AsyncClient) -> None:

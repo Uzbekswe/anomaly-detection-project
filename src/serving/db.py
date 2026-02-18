@@ -12,22 +12,19 @@ from datetime import datetime
 import psycopg2
 import psycopg2.pool
 
-from src.serving.predictor import load_serving_config
-
 logger = logging.getLogger(__name__)
 
 # Module-level connection pool (initialized lazily)
 _pool: psycopg2.pool.SimpleConnectionPool | None = None
 
 
-def _get_pool() -> psycopg2.pool.SimpleConnectionPool | None:
+def _get_pool(config: dict) -> psycopg2.pool.SimpleConnectionPool | None:
     """Get or create the connection pool. Returns None if DB is unavailable."""
     global _pool
     if _pool is not None:
         return _pool
 
     try:
-        config = load_serving_config()
         db_config = config.get("database", {})
 
         _pool = psycopg2.pool.SimpleConnectionPool(
@@ -47,6 +44,7 @@ def _get_pool() -> psycopg2.pool.SimpleConnectionPool | None:
 
 
 def store_anomaly_event(
+    config: dict,
     sensor_id: str,
     detected_at: datetime,
     anomaly_score: float,
@@ -58,7 +56,7 @@ def store_anomaly_event(
 
     Fails gracefully — logs a warning if the DB is unavailable.
     """
-    pool = _get_pool()
+    pool = _get_pool(config)
     if pool is None:
         return
 
@@ -85,6 +83,7 @@ def store_anomaly_event(
 
 
 def store_anomaly_events_batch(
+    config: dict,
     events: list[dict],
 ) -> None:
     """Insert multiple anomaly events in a single transaction.
@@ -97,7 +96,7 @@ def store_anomaly_events_batch(
     if not events:
         return
 
-    pool = _get_pool()
+    pool = _get_pool(config)
     if pool is None:
         return
 

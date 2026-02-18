@@ -74,7 +74,7 @@ def flatten_windows(windows: np.ndarray) -> np.ndarray:
 # ──────────────────────────────────────────────
 
 
-class IsolationForestDetector:
+class IsolationForestAnomalyDetector:
     """Wrapper around sklearn IsolationForest with a consistent interface.
 
     Provides the same predict_anomaly() signature as the LSTM Autoencoder
@@ -99,7 +99,7 @@ class IsolationForestDetector:
         )
         self._is_fitted = False
 
-    def fit(self, windows: np.ndarray) -> IsolationForestDetector:
+    def fit(self, windows: np.ndarray) -> IsolationForestAnomalyDetector:
         """Fit the Isolation Forest on training windows.
 
         Args:
@@ -188,8 +188,8 @@ class IsolationForestDetector:
 def build_isolation_forest(
     contamination: float | None = None,
     config_path: Path = MODEL_CONFIG_PATH,
-) -> IsolationForestDetector:
-    """Build IsolationForestDetector from config.
+) -> IsolationForestAnomalyDetector:
+    """Build IsolationForestAnomalyDetector from config.
 
     Args:
         contamination: Override contamination value (for grid search).
@@ -197,14 +197,14 @@ def build_isolation_forest(
         config_path: Path to model_config.yaml.
 
     Returns:
-        IsolationForestDetector instance.
+        IsolationForestAnomalyDetector instance.
     """
     config = load_iforest_config(config_path)
 
     if contamination is not None:
         config["contamination"] = contamination
 
-    detector = IsolationForestDetector(
+    detector = IsolationForestAnomalyDetector(
         n_estimators=config["n_estimators"],
         contamination=config["contamination"],
         max_samples=config["max_samples"],
@@ -213,7 +213,7 @@ def build_isolation_forest(
     )
 
     logger.info(
-        "Built IsolationForestDetector: n_estimators=%d, contamination=%.3f",
+        "Built IsolationForestAnomalyDetector: n_estimators=%d, contamination=%.3f",
         config["n_estimators"],
         config["contamination"],
     )

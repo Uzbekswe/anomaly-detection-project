@@ -16,7 +16,11 @@ data:
   test_size: 0.2
   validation_size: 0.1
   random_state: 42
-  shuffle: false         # time series — preserve temporal order within each unit
+  # For time series, shuffling is disabled to preserve temporal order.
+  # CRITICAL: Splitting should also be "unit-aware", meaning all data
+  # for a given engine/unit must belong to only one split (train, validation, or test)
+  # to prevent data leakage.
+  shuffle: false
 
 # ──────────────────────────────────────────────
 # LSTM Autoencoder Training

@@ -6,7 +6,8 @@
 # Shared across all models
 data:
   # CMAPSS FD001 sensor columns (0-indexed after unit_id, cycle)
-  # 3 operational settings + 21 sensors = 24 features total
+  # NOTE: Operational settings are not used as direct model inputs
+  # but are available for more advanced feature engineering.
   operational_settings: ["op_setting_1", "op_setting_2", "op_setting_3"]
   sensor_columns:
     - "sensor_1"
@@ -34,14 +35,28 @@ data:
   # Sensors with near-zero variance to drop (identified in EDA)
   drop_sensors: ["sensor_1", "sensor_5", "sensor_6", "sensor_10", "sensor_16", "sensor_18", "sensor_19"]
 
-  # After dropping, 14 sensors remain as model input features
-  # num_features is computed at runtime: len(sensor_columns) - len(drop_sensors)
-
   # Sliding window size (timesteps)
   window_size: 30
 
   # Anomaly labeling: cycles with RUL below this threshold are anomalies
   rul_anomaly_threshold: 30
+
+# ──────────────────────────────────────────────
+# Model Features
+# The final feature set passed to the models.
+# ──────────────────────────────────────────────
+model_features:
+  # The list of features to be used by the models.
+  # This should be the result of `sensor_columns` minus `drop_sensors`.
+  # The application should calculate this at runtime.
+  features: [
+    "sensor_2", "sensor_3", "sensor_4", "sensor_7", "sensor_8", "sensor_9",
+    "sensor_11", "sensor_12", "sensor_13", "sensor_14", "sensor_15",
+    "sensor_17", "sensor_20", "sensor_21"
+  ]
+  # Number of features, used to define model input_dim at runtime.
+  # (len(sensor_columns) - len(drop_sensors))
+  num_features: 14
 
 # ──────────────────────────────────────────────
 # Feature Engineering
@@ -53,9 +68,9 @@ features:
 
 # ──────────────────────────────────────────────
 # Model 1: LSTM Autoencoder (Primary)
+# input_dim is now derived from `model_features.num_features` at runtime
 # ──────────────────────────────────────────────
 lstm_autoencoder:
-  input_dim: 14          # num sensors after dropping low-variance ones
   hidden_dim: 64
   latent_dim: 32
   num_layers: 2
@@ -74,9 +89,9 @@ isolation_forest:
 
 # ──────────────────────────────────────────────
 # Model 3: PatchTST (Forecasting-Based)
+# input_dim is now derived from `model_features.num_features` at runtime
 # ──────────────────────────────────────────────
 patchtst:
-  input_dim: 14          # num sensors after dropping low-variance ones
   d_model: 64
   n_heads: 4
   num_encoder_layers: 3

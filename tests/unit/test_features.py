@@ -14,8 +14,8 @@ from src.features.engineer import (
     create_sliding_windows,
     drop_low_variance_sensors,
     get_feature_columns,
-    normalize,
-    transform_single_window,
+    fit_scaler,
+    transform_features,
 )
 
 # ──────────────────────────────────────────────
@@ -70,8 +70,8 @@ class TestMinMaxScaler:
 
     def test_transform_scales_to_0_1(self) -> None:
         df = pd.DataFrame({"a": [1.0, 2.0, 3.0], "b": [10.0, 20.0, 30.0]})
-        scaler = MinMaxScaler()
-        result = scaler.fit_transform(df)
+        scaler = MinMaxScaler().fit(df)
+        result = scaler.transform(df)
         assert result["a"].min() == pytest.approx(0.0)
         assert result["a"].max() == pytest.approx(1.0)
         assert result["b"].min() == pytest.approx(0.0)
@@ -79,8 +79,8 @@ class TestMinMaxScaler:
 
     def test_transform_zero_range(self) -> None:
         df = pd.DataFrame({"a": [5.0, 5.0, 5.0]})
-        scaler = MinMaxScaler()
-        result = scaler.fit_transform(df)
+        scaler = MinMaxScaler().fit(df)
+        result = scaler.transform(df)
         assert (result["a"] == 0.0).all()
 
     def test_serialization_roundtrip(self) -> None:
@@ -116,8 +116,8 @@ class TestStandardScaler:
 
     def test_transform_zero_mean(self) -> None:
         df = pd.DataFrame({"a": [1.0, 2.0, 3.0]})
-        scaler = StandardScaler()
-        result = scaler.fit_transform(df)
+        scaler = StandardScaler().fit(df)
+        result = scaler.transform(df)
         assert result["a"].mean() == pytest.approx(0.0, abs=1e-10)
 
     def test_serialization_roundtrip(self) -> None:
@@ -220,23 +220,19 @@ class TestGetFeatureColumns:
 
 
 # ──────────────────────────────────────────────
-# normalize
+# Normalization
 # ──────────────────────────────────────────────
 
 
-class TestNormalize:
-    def test_fit_true_returns_fitted_scaler(self, sample_df: pd.DataFrame) -> None:
-        result_df, scaler = normalize(sample_df, fit=True, method="min_max")
+class TestNormalization:
+    def test_fit_scaler_returns_fitted_scaler(self, sample_df: pd.DataFrame) -> None:
+        scaler = fit_scaler(sample_df, method="min_max")
         assert isinstance(scaler, MinMaxScaler)
         assert len(scaler.min_vals) > 0
 
-    def test_fit_false_requires_scaler(self, sample_df: pd.DataFrame) -> None:
-        with pytest.raises(ValueError, match="Must provide a fitted scaler"):
-            normalize(sample_df, fit=False, method="min_max")
-
-    def test_fit_false_uses_provided_scaler(self, sample_df: pd.DataFrame) -> None:
-        _, scaler = normalize(sample_df, fit=True, method="min_max")
-        result_df, _ = normalize(sample_df, scaler=scaler, fit=False, method="min_max")
+    def test_transform_features_uses_fitted_scaler(self, sample_df: pd.DataFrame) -> None:
+        scaler = fit_scaler(sample_df, method="min_max")
+        result_df = transform_features(sample_df, scaler)
         feature_cols = get_feature_columns(result_df)
         # All values should be in [0, 1] since we use same data
         for col in feature_cols:
@@ -298,26 +294,3 @@ class TestCreateSlidingWindows:
         assert len(windows) == 2 * (50 - window_size + 1)
 
 
-# ──────────────────────────────────────────────
-# transform_single_window
-# ──────────────────────────────────────────────
-
-
-class TestTransformSingleWindow:
-    def test_output_shape(self) -> None:
-        feature_cols = ["a", "b"]
-        scaler = MinMaxScaler()
-        scaler.fit(pd.DataFrame({"a": [0.0, 10.0], "b": [0.0, 100.0]}))
-        window = np.array([[5.0, 50.0], [7.0, 70.0]], dtype=np.float32)
-        result = transform_single_window(window, scaler, feature_cols)
-        assert result.shape == (2, 2)
-        assert result.dtype == np.float32
-
-    def test_values_normalized(self) -> None:
-        feature_cols = ["a"]
-        scaler = MinMaxScaler()
-        scaler.fit(pd.DataFrame({"a": [0.0, 10.0]}))
-        window = np.array([[5.0], [10.0]], dtype=np.float32)
-        result = transform_single_window(window, scaler, feature_cols)
-        assert result[0, 0] == pytest.approx(0.5)
-        assert result[1, 0] == pytest.approx(1.0)

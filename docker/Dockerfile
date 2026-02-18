@@ -35,24 +35,26 @@ RUN groupadd --gid 1000 appuser && \
 
 WORKDIR /app
 
-# Copy application code
+# Copy application code first
 COPY src/ ./src/
 COPY configs/ ./configs/
 COPY migrations/ ./migrations/
+COPY .env.example .env
 
-# Create directories for data/artifacts (writable by appuser)
+# Create directories for data/artifacts and set ownership
 RUN mkdir -p /app/data/artifacts /app/data/raw /app/data/plots && \
     chown -R appuser:appuser /app
 
 # Switch to non-root user
 USER appuser
 
-# Expose API port
+# Expose API port (read from env or default)
 EXPOSE 8000
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
-    CMD curl -f http://localhost:8000/health || exit 1
+    CMD curl -f http://localhost:${API_PORT:-8000}/health || exit 1
 
-# Run FastAPI with uvicorn
-CMD ["uvicorn", "src.serving.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Run FastAPI with uvicorn, allowing env override for port
+# Note: The app itself should read the host/port from config/env
+CMD ["uvicorn", "src.serving.main:app"]

@@ -16,7 +16,12 @@ from fastapi.responses import JSONResponse
 
 from src.serving.db import close_pool as close_db_pool
 from src.serving.middleware import RequestLoggingMiddleware, TimingMiddleware
-from src.serving.predictor import AnomalyPredictor, load_serving_config
+from src.serving.predictor import (
+    AnomalyPredictor,
+    find_latest_run_id,
+    load_model_from_run,
+    load_serving_config,
+)
 from src.serving.router import router, set_predictor
 
 logger = logging.getLogger(__name__)
@@ -30,14 +35,21 @@ async def lifespan(app: FastAPI):
     """Application lifespan: load model on startup, cleanup on shutdown."""
     # Startup
     logger.info("Starting anomaly detection service...")
-    predictor = AnomalyPredictor()
-    try:
-        predictor.load()
-        logger.info("Model loaded successfully: %s", predictor.model_version)
-    except Exception as e:
-        logger.warning("Model loading failed: %s. Service will start without model.", e)
+    
+    config = load_serving_config(SERVING_CONFIG_PATH)
+    model_name = config["model"]["name"]
+    model_stage = config["model"]["stage"]
 
-    set_predictor(predictor)
+    try:
+        run_id = find_latest_run_id(model_name, model_stage)
+        model_container = load_model_from_run(run_id)
+        predictor = AnomalyPredictor(model_container)
+        set_predictor(predictor)
+        logger.info("Model loaded successfully: %s", predictor.model_container.model_version)
+    except Exception as e:
+        logger.error("Model loading failed: %s. Service will start without a model.", e, exc_info=True)
+        # Start with an unloaded predictor so /health endpoint works
+        set_predictor(AnomalyPredictor(None))
 
     yield
 
@@ -46,22 +58,24 @@ async def lifespan(app: FastAPI):
     logger.info("Shutting down anomaly detection service.")
 
 
-def create_app(config_path: Path = SERVING_CONFIG_PATH) -> FastAPI:
-    """FastAPI application factory.
-
-    Args:
-        config_path: Path to serving_config.yaml.
-
-    Returns:
-        Configured FastAPI application.
-    """
-    config = load_serving_config(config_path)
+def create_app() -> FastAPI:
+    """FastAPI application factory."""
+    config = load_serving_config(SERVING_CONFIG_PATH)
+    api_config = config.get("api", {})
 
     app = FastAPI(
         title="Manufacturing Anomaly Detection API",
         description="Detect equipment anomalies from IoT sensor time-series data",
         version="0.1.0",
         lifespan=lifespan,
+    )
+    app.state.config = config
+    
+    # Configure logging
+    log_level = api_config.get("log_level", "INFO").upper()
+    logging.basicConfig(
+        level=log_level,
+        format="%(asctime)s — %(name)s — %(levelname)s — %(message)s",
     )
 
     # CORS middleware
@@ -81,7 +95,7 @@ def create_app(config_path: Path = SERVING_CONFIG_PATH) -> FastAPI:
     if middleware_config.get("enable_request_logging", True):
         app.add_middleware(RequestLoggingMiddleware)
 
-    # Global exception handler — bad input = 422, not 500
+    # Global exception handler
     @app.exception_handler(Exception)
     async def global_exception_handler(request: Request, exc: Exception) -> JSONResponse:
         logger.error("Unhandled exception on %s: %s", request.url.path, exc, exc_info=True)
@@ -102,18 +116,15 @@ app = create_app()
 
 if __name__ == "__main__":
     import uvicorn
-
-    config = load_serving_config()
+    
+    # This block is for local development only
+    config = load_serving_config(SERVING_CONFIG_PATH)
     api_config = config.get("api", {})
-
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s — %(name)s — %(levelname)s — %(message)s",
-    )
 
     uvicorn.run(
         "src.serving.main:app",
         host=api_config.get("host", "0.0.0.0"),
         port=int(api_config.get("port", 8000)),
         reload=True,
+        log_level=api_config.get("log_level", "info").lower(),
     )

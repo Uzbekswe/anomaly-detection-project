@@ -331,38 +331,32 @@ class PatchTST(nn.Module):
 
 def create_forecast_windows(
     windows: np.ndarray,
-    forecast_horizon: int | None = None,
-    config_path: Path = MODEL_CONFIG_PATH,
+    horizon: int,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Split sliding windows into input/target pairs for forecasting.
 
-    Takes overlapping windows of length seq_len and creates pairs where:
-        input  = window[i][:seq_len - forecast_horizon]
-        target = window[i][seq_len - forecast_horizon:]
+    Takes windows of length `seq_len` and splits them into:
+        input  = window[:, :-horizon, :]
+        target = window[:, -horizon:, :]
 
     Args:
         windows: (N, seq_len, num_features) — from feature engineering
-        forecast_horizon: Number of future steps to predict.
-        config_path: Path to model_config.yaml.
+        horizon: Number of future steps to predict.
 
     Returns:
         Tuple of:
-            inputs:  (N, seq_len - forecast_horizon, num_features)
-            targets: (N, forecast_horizon, num_features)
+            inputs:  (N, seq_len - horizon, num_features)
+            targets: (N, horizon, num_features)
     """
-    if forecast_horizon is None:
-        config = load_patchtst_config(config_path)
-        forecast_horizon = config["forecast_horizon"]
-
     seq_len = windows.shape[1]
 
-    if forecast_horizon >= seq_len:
+    if horizon >= seq_len:
         raise ValueError(
-            f"forecast_horizon ({forecast_horizon}) must be < seq_len ({seq_len})"
+            f"forecast_horizon ({horizon}) must be < seq_len ({seq_len})"
         )
 
-    inputs = windows[:, :seq_len - forecast_horizon, :]
-    targets = windows[:, seq_len - forecast_horizon:, :]
+    inputs = windows[:, :-horizon, :]
+    targets = windows[:, -horizon:, :]
 
     logger.info(
         "Created forecast pairs: inputs=%s, targets=%s",
@@ -370,6 +364,7 @@ def create_forecast_windows(
         targets.shape,
     )
     return inputs.astype(np.float32), targets.astype(np.float32)
+
 
 
 # ──────────────────────────────────────────────

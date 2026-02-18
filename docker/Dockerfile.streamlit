@@ -9,20 +9,19 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends curl && \
     rm -rf /var/lib/apt/lists/*
 
-# Install only dashboard dependencies (no torch/sklearn)
-RUN pip install --no-cache-dir \
-    streamlit>=1.29 \
-    plotly>=5.18 \
-    requests>=2.31 \
-    numpy>=1.24,<2.0
-
 # Create non-root user (Rule #9: security requirement)
 RUN groupadd --gid 1000 appuser && \
     useradd --uid 1000 --gid 1000 --create-home appuser
 
 WORKDIR /app
 
-# Copy only the dashboard code
+# Copy dependency definition first
+COPY dashboard/requirements.txt ./
+
+# Install dependencies from pinned versions
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy the rest of the dashboard code
 COPY dashboard/ ./dashboard/
 
 # Own files as appuser

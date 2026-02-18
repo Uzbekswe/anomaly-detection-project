@@ -81,11 +81,6 @@ class MinMaxScaler:
                 df[col] = lo + (df[col] - col_min) / col_range * (hi - lo)
         return df
 
-    def fit_transform(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Fit and transform in one step."""
-        self.fit(df)
-        return self.transform(df)
-
     def to_dict(self) -> dict:
         """Serialize for MLflow artifact logging."""
         return {
@@ -129,11 +124,6 @@ class StandardScaler:
             else:
                 df[col] = (df[col] - self.mean_vals[col]) / std
         return df
-
-    def fit_transform(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Fit and transform in one step."""
-        self.fit(df)
-        return self.transform(df)
 
     def to_dict(self) -> dict:
         """Serialize for MLflow artifact logging."""
@@ -262,44 +252,49 @@ def get_feature_columns(df: pd.DataFrame) -> list[str]:
     return [c for c in df.columns if c not in exclude]
 
 
-def normalize(
+def fit_scaler(
     df: pd.DataFrame,
-    scaler: MinMaxScaler | StandardScaler | None = None,
-    fit: bool = True,
     method: str | None = None,
-) -> tuple[pd.DataFrame, MinMaxScaler | StandardScaler]:
-    """Normalize feature columns.
-
-    For training: fit=True creates and fits a new scaler.
-    For serving: fit=False uses a pre-fitted scaler (loaded from MLflow).
+) -> MinMaxScaler | StandardScaler:
+    """Fit a scaler on the training data.
 
     Args:
-        df: DataFrame with feature columns.
-        scaler: Pre-fitted scaler (required when fit=False).
-        fit: Whether to fit the scaler on this data.
-        method: Normalization method. Loaded from config if None.
+        df: DataFrame with feature columns for fitting the scaler.
+        method: Normalization method ('min_max' or 'standard').
 
     Returns:
-        Tuple of (normalized DataFrame, fitted scaler).
+        A fitted scaler instance.
     """
     if method is None:
         config = load_feature_config()
         method = config["normalization"]
 
     feature_cols = get_feature_columns(df)
-    df = df.copy()
+    scaler = create_scaler(method)
+    scaler.fit(df[feature_cols])
+    logger.info("Fitted scaler on %d feature columns using '%s' method", len(feature_cols), method)
+    return scaler
 
-    if fit:
-        scaler = create_scaler(method)
-        df[feature_cols] = scaler.fit_transform(df[feature_cols])
-        logger.info("Fitted and transformed %d feature columns (%s)", len(feature_cols), method)
-    else:
-        if scaler is None:
-            raise ValueError("Must provide a fitted scaler when fit=False")
-        df[feature_cols] = scaler.transform(df[feature_cols])
-        logger.info("Transformed %d feature columns with pre-fitted scaler", len(feature_cols))
 
-    return df, scaler
+def transform_features(
+    df: pd.DataFrame,
+    scaler: MinMaxScaler | StandardScaler,
+) -> pd.DataFrame:
+    """Normalize feature columns using a pre-fitted scaler.
+
+    Args:
+        df: DataFrame with feature columns.
+        scaler: A pre-fitted scaler instance.
+
+    Returns:
+        The DataFrame with normalized feature columns.
+    """
+    feature_cols = get_feature_columns(df)
+    df_transformed = df.copy()
+    df_transformed[feature_cols] = scaler.transform(df[feature_cols])
+    logger.info("Transformed %d feature columns with pre-fitted scaler", len(feature_cols))
+    return df_transformed
+
 
 
 # ──────────────────────────────────────────────
@@ -415,16 +410,19 @@ def transform_single_window(
 
 def build_features(
     df: pd.DataFrame,
-    scaler: MinMaxScaler | StandardScaler | None = None,
-    fit_scaler: bool = True,
+    scaler: MinMaxScaler | StandardScaler,
     config_path: Path = MODEL_CONFIG_PATH,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, MinMaxScaler | StandardScaler, list[str]]:
-    """Full feature engineering pipeline: drop → rolling → normalize → window.
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[str]]:
+    """Full feature engineering pipeline for a given dataset (train, val, or test).
+
+    CRITICAL: A pre-fitted scaler must be provided. Fitting happens
+    only once on the training data.
+
+    Pipeline: drop → rolling → normalize → window.
 
     Args:
-        df: Raw DataFrame from ingest.py (with unit_id, sensors, labels).
-        scaler: Pre-fitted scaler (for serving / test set transforms).
-        fit_scaler: Whether to fit a new scaler (True for training).
+        df: Raw DataFrame from ingest.py.
+        scaler: A pre-fitted scaler from the training set.
         config_path: Path to model_config.yaml.
 
     Returns:
@@ -432,8 +430,7 @@ def build_features(
             windows:         (num_windows, window_size, num_features)
             labels:          (num_windows,)
             metadata:        (num_windows, 2) — [unit_id, time_cycles]
-            scaler:          Fitted scaler (save this for serving)
-            feature_columns: List of feature column names (save for serving)
+            feature_columns: List of feature column names
     """
     config = load_feature_config(config_path)
 
@@ -451,8 +448,8 @@ def build_features(
         rolling_statistics=config["rolling_statistics"],
     )
 
-    # Step 3: Normalize
-    df, scaler = normalize(df, scaler=scaler, fit=fit_scaler, method=config["normalization"])
+    # Step 3: Normalize using the pre-fitted scaler
+    df = transform_features(df, scaler)
 
     # Capture feature columns after all transforms
     feature_columns = get_feature_columns(df)
@@ -469,4 +466,5 @@ def build_features(
         len(windows),
         windows.shape[2] if len(windows) > 0 else 0,
     )
-    return windows, labels, metadata, scaler, feature_columns
+    return windows, labels, metadata, feature_columns
+

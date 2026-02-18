@@ -60,42 +60,66 @@ def resolve_device(device_str: str) -> torch.device:
     return torch.device(device_str)
 
 
+def set_seed(seed: int = 42):
+    """Set random seeds for reproducibility."""
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+    # When running on the CuDNN backend, two further options must be set
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    # Set a fixed value for the hash seed
+    os.environ["PYTHONHASHSEED"] = str(seed)
+    logger.info("Random seed set to %d", seed)
+
+
 # ──────────────────────────────────────────────
-# Data splitting
+# Data splitting (Unit-aware)
 # ──────────────────────────────────────────────
 
 
-def split_data(
-    windows: np.ndarray,
-    labels: np.ndarray,
+def split_data_unit_aware(
+    df: pd.DataFrame,
     test_size: float,
     validation_size: float,
-) -> dict[str, tuple[np.ndarray, np.ndarray]]:
-    """Split windows into train/val/test sets preserving temporal order.
+    random_state: int,
+) -> dict[str, pd.DataFrame]:
+    """Split DataFrame into train/val/test sets, ensuring units are not split.
 
-    No shuffling — time series data must maintain order.
+    Args:
+        df: The full DataFrame to split.
+        test_size: Proportion of units to allocate to the test set.
+        validation_size: Proportion of the remaining units for validation.
+        random_state: Seed for the random split.
 
     Returns:
-        Dict with keys "train", "val", "test", each containing (windows, labels).
+        A dictionary with "train", "val", and "test" DataFrames.
     """
-    n = len(windows)
-    test_start = int(n * (1 - test_size))
-    val_start = int(test_start * (1 - validation_size / (1 - test_size)))
+    unit_ids = df["unit_id"].unique()
+    n_units = len(unit_ids)
+    np.random.RandomState(random_state).shuffle(unit_ids)
+
+    test_split_idx = int(n_units * (1 - test_size))
+    val_split_idx = int(test_split_idx * (1 - validation_size / (1 - test_size)))
+
+    train_units = unit_ids[:val_split_idx]
+    val_units = unit_ids[val_split_idx:test_split_idx]
+    test_units = unit_ids[test_split_idx:]
 
     splits = {
-        "train": (windows[:val_start], labels[:val_start]),
-        "val": (windows[val_start:test_start], labels[val_start:test_start]),
-        "test": (windows[test_start:], labels[test_start:]),
+        "train": df[df["unit_id"].isin(train_units)].copy(),
+        "val": df[df["unit_id"].isin(val_units)].copy(),
+        "test": df[df["unit_id"].isin(test_units)].copy(),
     }
 
-    for name, (w, labels_split) in splits.items():
-        logger.info(
-            "Split '%s': %d windows, anomaly_rate=%.1f%%",
-            name,
-            len(w),
-            100 * labels_split.mean() if len(labels_split) > 0 else 0,
-        )
+    logger.info(
+        "Data split (unit-aware): train=%d units, val=%d units, test=%d units",
+        len(train_units), len(val_units), len(test_units)
+    )
     return splits
+
 
 
 # ──────────────────────────────────────────────
@@ -193,41 +217,41 @@ def log_model_size(model: nn.Module) -> float:
 
 
 def train_lstm_autoencoder(
-    splits: dict[str, tuple[np.ndarray, np.ndarray]],
+    data_splits: dict[str, dict],
     training_config: dict,
-    feature_config: dict,
+    model_config: dict,
     device: torch.device,
     scaler_dict: dict,
     feature_columns: list[str],
 ) -> None:
     """Train LSTM Autoencoder and log to MLflow."""
     config = training_config["lstm_autoencoder"]
-    train_windows, train_labels = splits["train"]
-    val_windows, val_labels = splits["val"]
-    test_windows, test_labels = splits["test"]
+    lstm_cfg = model_config["lstm_autoencoder"]
+    
+    train_windows = data_splits["train"]["windows"]
+    train_labels = data_splits["train"]["labels"]
+    val_windows = data_splits["val"]["windows"]
+    val_labels = data_splits["val"]["labels"]
+    test_windows = data_splits["test"]["windows"]
+    test_labels = data_splits["test"]["labels"]
 
-    input_dim = train_windows.shape[2]
-    seq_len = train_windows.shape[1]
+    # Get input_dim and seq_len from the data and config
+    input_dim = model_config["model_features"]["num_features"]
+    seq_len = model_config["data"]["window_size"]
 
     with mlflow.start_run(run_name="lstm_autoencoder_v1", tags={"model_type": "lstm_ae"}):
-        # Log params — read from model_config.yaml, never hardcode (Rule #1)
-        model_cfg = load_feature_config()  # loads model_config.yaml
-        lstm_cfg = model_cfg.get("lstm_autoencoder", {})
+        # Log params
         mlflow.log_params({
             "model_type": "lstm_autoencoder",
             "input_dim": input_dim,
             "seq_len": seq_len,
-            "window_size": feature_config["window_size"],
-            "hidden_dim": lstm_cfg.get("hidden_dim", 64),
-            "latent_dim": lstm_cfg.get("latent_dim", 32),
-            "num_layers": lstm_cfg.get("num_layers", 2),
+            "hidden_dim": lstm_cfg["hidden_dim"],
+            "latent_dim": lstm_cfg["latent_dim"],
+            "num_layers": lstm_cfg["num_layers"],
+            "dropout": lstm_cfg["dropout"],
             "epochs": config["epochs"],
             "batch_size": config["batch_size"],
             "learning_rate": config["learning_rate"],
-            "weight_decay": config["weight_decay"],
-            "train_samples": len(train_windows),
-            "val_samples": len(val_windows),
-            "test_samples": len(test_windows),
         })
 
         # Build model
@@ -379,17 +403,25 @@ def train_lstm_autoencoder(
 
 
 def train_isolation_forest(
-    splits: dict[str, tuple[np.ndarray, np.ndarray]],
+    data_splits: dict[str, dict],
     training_config: dict,
-    feature_config: dict,
+    model_config: dict,
     scaler_dict: dict,
     feature_columns: list[str],
 ) -> None:
     """Train Isolation Forest with contamination grid search, log to MLflow."""
     contamination_grid = training_config["isolation_forest"]["contamination_grid"]
-    train_windows, train_labels = splits["train"]
-    val_windows, val_labels = splits["val"]
-    test_windows, test_labels = splits["test"]
+    
+    train_windows = data_splits["train"]["windows"]
+    val_windows = data_splits["val"]["windows"]
+    val_labels = data_splits["val"]["labels"]
+    test_windows = data_splits["test"]["windows"]
+    test_labels = data_splits["test"]["labels"]
+
+    # Reshape windows for sklearn model
+    train_windows_flat = train_windows.reshape(train_windows.shape[0], -1)
+    val_windows_flat = val_windows.reshape(val_windows.shape[0], -1)
+    test_windows_flat = test_windows.reshape(test_windows.shape[0], -1)
 
     best_f1 = -1.0
     best_contamination = contamination_grid[0]
@@ -402,10 +434,10 @@ def train_isolation_forest(
             start_time = time.time()
 
             detector = build_isolation_forest(contamination=contamination)
-            detector.fit(train_windows)
+            detector.fit(train_windows_flat)
 
             # Evaluate on validation set
-            val_scores, val_preds = detector.predict_anomaly(val_windows)
+            val_scores, val_preds = detector.predict_anomaly(val_windows_flat)
             f1 = f1_score(val_labels, val_preds, zero_division=0)
 
             training_time = time.time() - start_time
@@ -438,7 +470,7 @@ def train_isolation_forest(
         })
 
         # Evaluate best model on test set
-        test_scores, test_preds = best_detector.predict_anomaly(test_windows)
+        test_scores, test_preds = best_detector.predict_anomaly(test_windows_flat)
         test_metrics = {
             "test_f1": f1_score(test_labels, test_preds, zero_division=0),
             "test_precision": precision_score(test_labels, test_preds, zero_division=0),
@@ -487,25 +519,30 @@ def train_isolation_forest(
 
 
 def train_patchtst(
-    splits: dict[str, tuple[np.ndarray, np.ndarray]],
+    data_splits: dict[str, dict],
     training_config: dict,
-    feature_config: dict,
+    model_config: dict,
     device: torch.device,
     scaler_dict: dict,
     feature_columns: list[str],
 ) -> None:
     """Train PatchTST forecasting model and log to MLflow."""
     config = training_config["patchtst"]
-    train_windows, train_labels = splits["train"]
-    val_windows, val_labels = splits["val"]
-    test_windows, test_labels = splits["test"]
+    patchtst_cfg = model_config["patchtst"]
+    
+    train_windows = data_splits["train"]["windows"]
+    val_windows = data_splits["val"]["windows"]
+    val_labels = data_splits["val"]["labels"]
+    test_windows = data_splits["test"]["windows"]
+    test_labels = data_splits["test"]["labels"]
 
     # Split windows into input/target pairs for forecasting
-    train_inputs, train_targets = create_forecast_windows(train_windows)
-    val_inputs, val_targets = create_forecast_windows(val_windows)
-    test_inputs, test_targets = create_forecast_windows(test_windows)
+    train_inputs, train_targets = create_forecast_windows(train_windows, horizon=patchtst_cfg["forecast_horizon"])
+    val_inputs, val_targets = create_forecast_windows(val_windows, horizon=patchtst_cfg["forecast_horizon"])
+    test_inputs, test_targets = create_forecast_windows(test_windows, horizon=patchtst_cfg["forecast_horizon"])
 
-    input_dim = train_inputs.shape[2]
+    # Get input_dim and seq_len from the data and config
+    input_dim = model_config["model_features"]["num_features"]
     seq_len = train_inputs.shape[1]
 
     with mlflow.start_run(run_name="patchtst_v1", tags={"model_type": "patchtst"}):
@@ -514,19 +551,30 @@ def train_patchtst(
             "model_type": "patchtst",
             "input_dim": input_dim,
             "seq_len": seq_len,
-            "forecast_horizon": train_targets.shape[1],
-            "window_size": feature_config["window_size"],
+            "forecast_horizon": patchtst_cfg["forecast_horizon"],
+            "patch_length": patchtst_cfg["patch_length"],
+            "stride": patchtst_cfg["stride"],
+            "d_model": patchtst_cfg["d_model"],
+            "n_heads": patchtst_cfg["n_heads"],
+            "num_encoder_layers": patchtst_cfg["num_encoder_layers"],
             "epochs": config["epochs"],
             "batch_size": config["batch_size"],
             "learning_rate": config["learning_rate"],
-            "weight_decay": config["weight_decay"],
-            "train_samples": len(train_inputs),
-            "val_samples": len(val_inputs),
-            "test_samples": len(test_inputs),
         })
 
         # Build model
-        model = build_patchtst(input_dim=input_dim, seq_len=seq_len)
+        model = build_patchtst(
+            input_dim=input_dim,
+            seq_len=seq_len,
+            forecast_horizon=patchtst_cfg["forecast_horizon"],
+            patch_len=patchtst_cfg["patch_length"],
+            stride=patchtst_cfg["stride"],
+            d_model=patchtst_cfg["d_model"],
+            n_heads=patchtst_cfg["n_heads"],
+            num_encoder_layers=patchtst_cfg["num_encoder_layers"],
+            d_ff=patchtst_cfg["d_ff"],
+            dropout=patchtst_cfg["dropout"],
+        )
         model = model.to(device)
 
         # Prepare data loaders
@@ -716,8 +764,15 @@ def main() -> None:
     # Load configs
     training_config = load_training_config(args.config)
     feature_config = load_feature_config()
+    model_config_path = PROJECT_ROOT / "configs" / "model_config.yaml"
+    with open(model_config_path) as f:
+        model_config = yaml.safe_load(f)
+
     device = resolve_device(training_config.get("device", "auto"))
     logger.info("Using device: %s", device)
+
+    # Set seed for reproducibility
+    set_seed(training_config["data"]["random_state"])
 
     # Setup MLflow
     setup_mlflow(training_config)
@@ -726,25 +781,44 @@ def main() -> None:
     logger.info("Ingesting CMAPSS data...")
     df = ingest_train_data(download=args.download)
 
-    # Feature engineering
-    logger.info("Building features...")
-    windows, labels, metadata, scaler, feature_columns = build_features(df)
-    scaler_dict = scaler.to_dict()
-
-    logger.info(
-        "Data ready: %d windows, shape=%s, anomaly_rate=%.1f%%",
-        len(windows),
-        windows.shape,
-        100 * labels.mean(),
-    )
-
-    # Split data
-    splits = split_data(
-        windows,
-        labels,
+    # 1. Split data at the unit level BEFORE feature engineering
+    logger.info("Splitting data (unit-aware)...")
+    df_splits = split_data_unit_aware(
+        df,
         test_size=training_config["data"]["test_size"],
         validation_size=training_config["data"]["validation_size"],
+        random_state=training_config["data"]["random_state"],
     )
+
+    # 2. Fit scaler ONCE on the training data
+    logger.info("Fitting feature scaler on training data...")
+    scaler = fit_scaler(df_splits["train"], method=feature_config["normalization"])
+    scaler_dict = scaler.to_dict()
+
+    # Log scaler as a separate artifact in a parent run
+    with mlflow.start_run(run_name="feature_engineering", nested=True) as parent_run:
+        mlflow.log_dict(scaler_dict, "scaler.json")
+        mlflow.log_params({"normalization_method": feature_config["normalization"]})
+        parent_run_id = parent_run.info.run_id
+        logger.info("Logged scaler and feature engineering params to parent run: %s", parent_run_id)
+
+    # 3. Build features for each split using the SAME fitted scaler
+    data_splits = {}
+    for split_name, split_df in df_splits.items():
+        logger.info("Building features for '%s' split...", split_name)
+        windows, labels, metadata, feature_columns = build_features(split_df, scaler)
+        data_splits[split_name] = {
+            "windows": windows,
+            "labels": labels,
+            "metadata": metadata,
+        }
+        logger.info(
+            "'%s' split ready: %d windows, shape=%s, anomaly_rate=%.1f%%",
+            split_name,
+            len(windows),
+            windows.shape,
+            100 * labels.mean() if len(labels) > 0 else 0,
+        )
 
     # Determine which models to train
     models_to_train = list(TRAINERS.keys()) if args.model == "all" else [args.model]
@@ -757,23 +831,20 @@ def main() -> None:
 
         trainer = TRAINERS[model_name]
 
-        if model_name == "isolation_forest":
-            trainer(
-                splits=splits,
-                training_config=training_config,
-                feature_config=feature_config,
-                scaler_dict=scaler_dict,
-                feature_columns=feature_columns,
-            )
-        else:
-            trainer(
-                splits=splits,
-                training_config=training_config,
-                feature_config=feature_config,
-                device=device,
-                scaler_dict=scaler_dict,
-                feature_columns=feature_columns,
-            )
+        # Each trainer function will receive the full data_splits dictionary
+        # and the feature_columns list for artifact logging.
+        # We also pass the full model_config for dynamic parameter access.
+        trainer_args = {
+            "data_splits": data_splits,
+            "training_config": training_config,
+            "model_config": model_config,
+            "scaler_dict": scaler_dict,
+            "feature_columns": feature_columns,
+        }
+        if model_name != "isolation_forest":
+            trainer_args["device"] = device
+
+        trainer(**trainer_args)
 
     logger.info("=" * 60)
     logger.info("All training complete!")
