@@ -70,8 +70,8 @@ docker/postgres_data/
 Thumbs.db
 
 # ──────────────────────────────────────────────
-# Generated artifacts (model weights, plots, logs)
+# Generated artifacts (plots, logs)
 # ──────────────────────────────────────────────
-data/artifacts/
+# data/artifacts/ — committed for Streamlit Cloud deployment
 data/plots/
 *.log

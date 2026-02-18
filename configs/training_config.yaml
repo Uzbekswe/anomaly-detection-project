@@ -6,7 +6,7 @@
 # MLflow
 mlflow:
   experiment_name: "anomaly_detection_cmapss"
-  tracking_uri: "${MLFLOW_TRACKING_URI:-http://localhost:5000}"
+  tracking_uri: "${MLFLOW_TRACKING_URI:-http://localhost:5001}"
   tags:
     project: "manufacturing_anomaly_detection"
     dataset: "cmapss_fd001"

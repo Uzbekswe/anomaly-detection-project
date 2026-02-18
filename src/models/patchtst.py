@@ -375,6 +375,7 @@ def create_forecast_windows(
 def build_patchtst(
     input_dim: int,
     seq_len: int,
+    horizon: int,
     config_path: Path = MODEL_CONFIG_PATH,
 ) -> PatchTST:
     """Build PatchTST model from config.
@@ -382,6 +383,7 @@ def build_patchtst(
     Args:
         input_dim: Number of features per timestep (from feature engineering).
         seq_len: Input sequence length (seq_len - forecast_horizon).
+        horizon: The forecast horizon.
         config_path: Path to model_config.yaml.
 
     Returns:
@@ -392,7 +394,7 @@ def build_patchtst(
     model = PatchTST(
         input_dim=input_dim,
         seq_len=seq_len,
-        forecast_horizon=config["forecast_horizon"],
+        forecast_horizon=horizon,
         patch_length=config["patch_length"],
         stride=config["stride"],
         d_model=config["d_model"],
@@ -412,7 +414,7 @@ def build_patchtst(
         "params=%d (trainable=%d)",
         input_dim,
         seq_len,
-        config["forecast_horizon"],
+        horizon,
         num_patches,
         config["patch_length"],
         config["stride"],

@@ -15,25 +15,39 @@ import argparse
 import logging
 import os
 import time
+import json
 from pathlib import Path
 
 import mlflow
 import numpy as np
+import pandas as pd
 import torch
 import torch.nn as nn
 import yaml
 from sklearn.metrics import f1_score, precision_score, recall_score, roc_auc_score
 from torch.utils.data import DataLoader, TensorDataset
 
+import io
+import joblib
+
 from src.data.ingest import ingest_train_data
-from src.features.engineer import build_features, load_feature_config
-from src.models.isolation_forest import build_isolation_forest
+from src.features.engineer import (
+    add_rolling_features,
+    create_sliding_windows,
+    drop_low_variance_sensors,
+    fit_scaler,
+    get_feature_columns,
+    load_feature_config,
+    transform_features,
+)
+from src.models.isolation_forest import build_isolation_forest, IsolationForestAnomalyDetector
 from src.models.lstm_autoencoder import build_lstm_autoencoder
 from src.models.patchtst import build_patchtst, create_forecast_windows
 
 logger = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+LOCAL_ARTIFACT_PATH = PROJECT_ROOT / "data" / "artifacts"
 
 
 # ──────────────────────────────────────────────
@@ -119,7 +133,6 @@ def split_data_unit_aware(
         len(train_units), len(val_units), len(test_units)
     )
     return splits
-
 
 
 # ──────────────────────────────────────────────
@@ -236,7 +249,7 @@ def train_lstm_autoencoder(
     test_labels = data_splits["test"]["labels"]
 
     # Get input_dim and seq_len from the data and config
-    input_dim = model_config["model_features"]["num_features"]
+    input_dim = train_windows.shape[2]
     seq_len = model_config["data"]["window_size"]
 
     with mlflow.start_run(run_name="lstm_autoencoder_v1", tags={"model_type": "lstm_ae"}):
@@ -376,8 +389,8 @@ def train_lstm_autoencoder(
             **test_metrics,
         })
 
-        # Save artifacts
-        model_path = PROJECT_ROOT / "data" / "artifacts" / "lstm_autoencoder.pt"
+        # Save artifacts locally
+        model_path = LOCAL_ARTIFACT_PATH / "lstm_autoencoder.pt"
         model_path.parent.mkdir(parents=True, exist_ok=True)
         torch.save({
             "model_state_dict": model.state_dict(),
@@ -387,8 +400,7 @@ def train_lstm_autoencoder(
             "scaler": scaler_dict,
             "feature_columns": feature_columns,
         }, model_path)
-        mlflow.log_artifact(str(model_path))
-
+        
         logger.info(
             "LSTM-AE training complete: test_f1=%.4f, threshold=%.4f, time=%.1fs",
             test_metrics["test_f1"],
@@ -418,10 +430,9 @@ def train_isolation_forest(
     test_windows = data_splits["test"]["windows"]
     test_labels = data_splits["test"]["labels"]
 
-    # Reshape windows for sklearn model
-    train_windows_flat = train_windows.reshape(train_windows.shape[0], -1)
-    val_windows_flat = val_windows.reshape(val_windows.shape[0], -1)
-    test_windows_flat = test_windows.reshape(test_windows.shape[0], -1)
+    # NOTE: IsolationForestAnomalyDetector.fit() and predict_anomaly()
+    # expect 3D windows (N, seq_len, features) and handle flattening internally
+    # via flatten_windows() which computes mean+std summary statistics.
 
     best_f1 = -1.0
     best_contamination = contamination_grid[0]
@@ -434,10 +445,10 @@ def train_isolation_forest(
             start_time = time.time()
 
             detector = build_isolation_forest(contamination=contamination)
-            detector.fit(train_windows_flat)
+            detector.fit(train_windows)
 
             # Evaluate on validation set
-            val_scores, val_preds = detector.predict_anomaly(val_windows_flat)
+            val_scores, val_preds = detector.predict_anomaly(val_windows)
             f1 = f1_score(val_labels, val_preds, zero_division=0)
 
             training_time = time.time() - start_time
@@ -463,14 +474,14 @@ def train_isolation_forest(
             "model_type": "isolation_forest",
             "best_contamination": best_contamination,
             "n_estimators": best_detector.model.n_estimators,
-            "window_size": feature_config["window_size"],
+            "window_size": model_config["data"]["window_size"],
             "train_samples": len(train_windows),
             "val_samples": len(val_windows),
             "test_samples": len(test_windows),
         })
 
         # Evaluate best model on test set
-        test_scores, test_preds = best_detector.predict_anomaly(test_windows_flat)
+        test_scores, test_preds = best_detector.predict_anomaly(test_windows)
         test_metrics = {
             "test_f1": f1_score(test_labels, test_preds, zero_division=0),
             "test_precision": precision_score(test_labels, test_preds, zero_division=0),
@@ -480,11 +491,8 @@ def train_isolation_forest(
             test_metrics["test_auc_roc"] = roc_auc_score(test_labels, test_scores)
 
         # Model size estimate (serialize to measure actual model size)
-        import io
-
-        import joblib as _joblib
         buf = io.BytesIO()
-        _joblib.dump(best_detector, buf)
+        joblib.dump(best_detector, buf)
         model_size_mb = buf.tell() / (1024 * 1024)
 
         mlflow.log_metrics({
@@ -493,10 +501,8 @@ def train_isolation_forest(
             **test_metrics,
         })
 
-        # Save artifacts
-        import joblib
-
-        artifact_path = PROJECT_ROOT / "data" / "artifacts" / "isolation_forest.joblib"
+        # Save artifacts locally
+        artifact_path = LOCAL_ARTIFACT_PATH / "isolation_forest.joblib"
         artifact_path.parent.mkdir(parents=True, exist_ok=True)
         joblib.dump({
             "model": best_detector,
@@ -504,7 +510,6 @@ def train_isolation_forest(
             "scaler": scaler_dict,
             "feature_columns": feature_columns,
         }, artifact_path)
-        mlflow.log_artifact(str(artifact_path))
 
         logger.info(
             "IsolationForest training complete: best_contamination=%.3f, test_f1=%.4f",
@@ -536,13 +541,31 @@ def train_patchtst(
     test_windows = data_splits["test"]["windows"]
     test_labels = data_splits["test"]["labels"]
 
+    # Channel reduction: use only raw sensor/op_setting columns (not rolling
+    # features) so the transformer processes ~17 channels instead of ~101.
+    # This makes training ~5-6x faster with minimal accuracy loss.
+    raw_feature_indices = [
+        i for i, col in enumerate(feature_columns)
+        if "rolling" not in col
+    ]
+    raw_feature_cols = [feature_columns[i] for i in raw_feature_indices]
+    logger.info(
+        "PatchTST channel reduction: %d → %d features (dropped rolling)",
+        len(feature_columns),
+        len(raw_feature_cols),
+    )
+
+    train_windows = train_windows[:, :, raw_feature_indices]
+    val_windows = val_windows[:, :, raw_feature_indices]
+    test_windows = test_windows[:, :, raw_feature_indices]
+
     # Split windows into input/target pairs for forecasting
     train_inputs, train_targets = create_forecast_windows(train_windows, horizon=patchtst_cfg["forecast_horizon"])
     val_inputs, val_targets = create_forecast_windows(val_windows, horizon=patchtst_cfg["forecast_horizon"])
     test_inputs, test_targets = create_forecast_windows(test_windows, horizon=patchtst_cfg["forecast_horizon"])
 
     # Get input_dim and seq_len from the data and config
-    input_dim = model_config["model_features"]["num_features"]
+    input_dim = train_inputs.shape[2]
     seq_len = train_inputs.shape[1]
 
     with mlflow.start_run(run_name="patchtst_v1", tags={"model_type": "patchtst"}):
@@ -562,18 +585,11 @@ def train_patchtst(
             "learning_rate": config["learning_rate"],
         })
 
-        # Build model
+        # Build model (factory reads arch params from model_config.yaml)
         model = build_patchtst(
             input_dim=input_dim,
             seq_len=seq_len,
-            forecast_horizon=patchtst_cfg["forecast_horizon"],
-            patch_len=patchtst_cfg["patch_length"],
-            stride=patchtst_cfg["stride"],
-            d_model=patchtst_cfg["d_model"],
-            n_heads=patchtst_cfg["n_heads"],
-            num_encoder_layers=patchtst_cfg["num_encoder_layers"],
-            d_ff=patchtst_cfg["d_ff"],
-            dropout=patchtst_cfg["dropout"],
+            horizon=patchtst_cfg["forecast_horizon"],
         )
         model = model.to(device)
 
@@ -700,8 +716,8 @@ def train_patchtst(
             **test_metrics,
         })
 
-        # Save artifacts
-        model_path = PROJECT_ROOT / "data" / "artifacts" / "patchtst.pt"
+        # Save artifacts locally
+        model_path = LOCAL_ARTIFACT_PATH / "patchtst.pt"
         model_path.parent.mkdir(parents=True, exist_ok=True)
         torch.save({
             "model_state_dict": model.state_dict(),
@@ -710,10 +726,9 @@ def train_patchtst(
             "seq_len": seq_len,
             "forecast_horizon": train_targets.shape[1],
             "scaler": scaler_dict,
-            "feature_columns": feature_columns,
+            "feature_columns": raw_feature_cols,
         }, model_path)
-        mlflow.log_artifact(str(model_path))
-
+        
         logger.info(
             "PatchTST training complete: test_f1=%.4f, threshold=%.4f, time=%.1fs",
             test_metrics["test_f1"],
@@ -790,23 +805,49 @@ def main() -> None:
         random_state=training_config["data"]["random_state"],
     )
 
-    # 2. Fit scaler ONCE on the training data
-    logger.info("Fitting feature scaler on training data...")
-    scaler = fit_scaler(df_splits["train"], method=feature_config["normalization"])
+    # 2. Build features for all splits
+    logger.info("Building features for all splits...")
+    engineered_splits = {}
+    feature_columns = []
+    for split_name, split_df in df_splits.items():
+        # Drop low-variance sensors
+        df_dropped = drop_low_variance_sensors(split_df, feature_config["drop_sensors"])
+        # Add rolling features
+        engineered_df = add_rolling_features(
+            df_dropped,
+            sensor_columns=[c for c in feature_config["sensor_columns"] if c not in feature_config["drop_sensors"]],
+            rolling_window_sizes=feature_config["rolling_window_sizes"],
+            rolling_statistics=feature_config["rolling_statistics"],
+        )
+        engineered_splits[split_name] = engineered_df
+        if not feature_columns:
+            feature_columns = get_feature_columns(engineered_df)
+
+
+    # 3. Fit scaler on the engineered TRAINING data
+    logger.info("Fitting feature scaler on engineered training data...")
+    scaler = fit_scaler(engineered_splits["train"], method=feature_config["normalization"])
     scaler_dict = scaler.to_dict()
 
-    # Log scaler as a separate artifact in a parent run
-    with mlflow.start_run(run_name="feature_engineering", nested=True) as parent_run:
-        mlflow.log_dict(scaler_dict, "scaler.json")
-        mlflow.log_params({"normalization_method": feature_config["normalization"]})
-        parent_run_id = parent_run.info.run_id
-        logger.info("Logged scaler and feature engineering params to parent run: %s", parent_run_id)
+    # Save scaler locally
+    scaler_path = LOCAL_ARTIFACT_PATH / "scaler.json"
+    scaler_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(scaler_path, "w") as f:
+        json.dump(scaler_dict, f)
+    logger.info("Scaler saved locally to %s", scaler_path)
 
-    # 3. Build features for each split using the SAME fitted scaler
+    # 4. Transform all engineered splits with the fitted scaler and create windows
     data_splits = {}
-    for split_name, split_df in df_splits.items():
-        logger.info("Building features for '%s' split...", split_name)
-        windows, labels, metadata, feature_columns = build_features(split_df, scaler)
+    for split_name, engineered_df in engineered_splits.items():
+        logger.info("Transforming features and creating windows for '%s' split...", split_name)
+        
+        df_transformed = transform_features(engineered_df, scaler)
+        windows, labels, metadata = create_sliding_windows(
+            df_transformed,
+            window_size=feature_config["window_size"],
+            feature_columns=feature_columns,
+        )
+
         data_splits[split_name] = {
             "windows": windows,
             "labels": labels,

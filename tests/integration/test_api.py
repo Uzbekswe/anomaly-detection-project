@@ -6,7 +6,6 @@ The predictor is mocked to isolate tests from needing a trained model.
 
 from __future__ import annotations
 
-from contextlib import asynccontextmanager
 from unittest.mock import MagicMock, patch
 
 import pytest

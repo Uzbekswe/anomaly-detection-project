@@ -39,7 +39,7 @@ services:
         --backend-store-uri sqlite:///mlflow/mlflow.db
         --default-artifact-root /mlflow/artifacts
     ports:
-      - "5000:5000"
+      - "5001:5000"
     volumes:
       - mlflow_data:/mlflow
     networks:
@@ -67,6 +67,7 @@ services:
       API_PORT: "8000"
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       MAX_BATCH_SIZE: ${MAX_BATCH_SIZE:-500}
+      MLFLOW_ARTIFACT_URI: file:///tmp/mlruns
     ports:
       - "8000:8000"
     networks:

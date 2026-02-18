@@ -19,10 +19,11 @@ from src.serving.middleware import RequestLoggingMiddleware, TimingMiddleware
 from src.serving.predictor import (
     AnomalyPredictor,
     find_latest_run_id,
+    load_model_from_local,
     load_model_from_run,
-    load_serving_config,
 )
 from src.serving.router import router, set_predictor
+from src.serving.config_utils import load_serving_config
 
 logger = logging.getLogger(__name__)
 
@@ -45,11 +46,17 @@ async def lifespan(app: FastAPI):
         model_container = load_model_from_run(run_id)
         predictor = AnomalyPredictor(model_container)
         set_predictor(predictor)
-        logger.info("Model loaded successfully: %s", predictor.model_container.model_version)
-    except Exception as e:
-        logger.error("Model loading failed: %s. Service will start without a model.", e, exc_info=True)
-        # Start with an unloaded predictor so /health endpoint works
-        set_predictor(AnomalyPredictor(None))
+        logger.info("Model loaded from MLflow: %s", predictor.model_container.model_version)
+    except Exception as mlflow_err:
+        logger.warning("MLflow model loading failed: %s. Trying local artifacts...", mlflow_err)
+        try:
+            model_container = load_model_from_local(model_name)
+            predictor = AnomalyPredictor(model_container)
+            set_predictor(predictor)
+            logger.info("Model loaded from local artifacts: %s", predictor.model_container.model_version)
+        except Exception as local_err:
+            logger.error("Local artifact loading also failed: %s. Service starts without model.", local_err, exc_info=True)
+            set_predictor(AnomalyPredictor(None))
 
     yield
 

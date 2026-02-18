@@ -289,6 +289,9 @@ def transform_features(
     Returns:
         The DataFrame with normalized feature columns.
     """
+    if scaler is None:
+        return df
+
     feature_cols = get_feature_columns(df)
     df_transformed = df.copy()
     df_transformed[feature_cols] = scaler.transform(df[feature_cols])
@@ -410,19 +413,19 @@ def transform_single_window(
 
 def build_features(
     df: pd.DataFrame,
-    scaler: MinMaxScaler | StandardScaler,
+    scaler: MinMaxScaler | StandardScaler | None, # Allow scaler to be None
     config_path: Path = MODEL_CONFIG_PATH,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[str]]:
     """Full feature engineering pipeline for a given dataset (train, val, or test).
 
-    CRITICAL: A pre-fitted scaler must be provided. Fitting happens
-    only once on the training data.
+    If scaler is None, normalization is skipped. This is used for the initial
+    pass on the training data to get the feature columns for fitting the scaler.
 
-    Pipeline: drop → rolling → normalize → window.
+    Pipeline: drop → rolling → [normalize] → window.
 
     Args:
         df: Raw DataFrame from ingest.py.
-        scaler: A pre-fitted scaler from the training set.
+        scaler: A pre-fitted scaler from the training set, or None.
         config_path: Path to model_config.yaml.
 
     Returns:
@@ -448,8 +451,9 @@ def build_features(
         rolling_statistics=config["rolling_statistics"],
     )
 
-    # Step 3: Normalize using the pre-fitted scaler
-    df = transform_features(df, scaler)
+    # Step 3: Normalize using the pre-fitted scaler if provided
+    if scaler:
+        df = transform_features(df, scaler)
 
     # Capture feature columns after all transforms
     feature_columns = get_feature_columns(df)
@@ -467,4 +471,3 @@ def build_features(
         windows.shape[2] if len(windows) > 0 else 0,
     )
     return windows, labels, metadata, feature_columns
-
