@@ -1,0 +1,117 @@
+# ──────────────────────────────────────────────
+# Manufacturing Anomaly Detection — Docker Compose
+# Services: fastapi, mlflow, streamlit, postgres
+# Network: anomaly-net (shared)
+# ──────────────────────────────────────────────
+
+services:
+
+  # ── PostgreSQL — Anomaly event history ──
+  postgres:
+    image: postgres:15-alpine
+    container_name: anomaly-postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-anomaly_db}
+      POSTGRES_USER: ${POSTGRES_USER:-anomaly_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme_in_prod}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - anomaly-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-anomaly_user} -d ${POSTGRES_DB:-anomaly_db}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  # ── MLflow — Experiment tracking UI ──
+  mlflow:
+    image: ghcr.io/mlflow/mlflow
+    container_name: anomaly-mlflow
+    command: >
+      mlflow server
+        --host 0.0.0.0
+        --port 5000
+        --backend-store-uri sqlite:///mlflow/mlflow.db
+        --default-artifact-root /mlflow/artifacts
+    ports:
+      - "5000:5000"
+    volumes:
+      - mlflow_data:/mlflow
+    networks:
+      - anomaly-net
+    restart: unless-stopped
+
+  # ── FastAPI — Model serving API ──
+  fastapi:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: anomaly-fastapi
+    environment:
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      MLFLOW_EXPERIMENT_NAME: ${MLFLOW_EXPERIMENT_NAME:-anomaly_detection_cmapss}
+      MODEL_NAME: ${MODEL_NAME:-lstm_autoencoder}
+      MODEL_STAGE: ${MODEL_STAGE:-Production}
+      ANOMALY_THRESHOLD: ${ANOMALY_THRESHOLD:-0.65}
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: ${POSTGRES_DB:-anomaly_db}
+      POSTGRES_USER: ${POSTGRES_USER:-anomaly_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme_in_prod}
+      API_HOST: "0.0.0.0"
+      API_PORT: "8000"
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      MAX_BATCH_SIZE: ${MAX_BATCH_SIZE:-500}
+    ports:
+      - "8000:8000"
+    networks:
+      - anomaly-net
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mlflow:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    restart: unless-stopped
+
+  # ── Streamlit — Live dashboard ──
+  streamlit:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.streamlit
+    container_name: anomaly-streamlit
+    environment:
+      STREAMLIT_API_URL: http://fastapi:8000
+      STREAMLIT_REFRESH_INTERVAL_SEC: ${STREAMLIT_REFRESH_INTERVAL_SEC:-5}
+    ports:
+      - "8501:8501"
+    networks:
+      - anomaly-net
+    depends_on:
+      fastapi:
+        condition: service_healthy
+    restart: unless-stopped
+
+# ──────────────────────────────────────────────
+# Shared network
+# ──────────────────────────────────────────────
+networks:
+  anomaly-net:
+    driver: bridge
+
+# ──────────────────────────────────────────────
+# Persistent volumes
+# ──────────────────────────────────────────────
+volumes:
+  postgres_data:
+  mlflow_data:

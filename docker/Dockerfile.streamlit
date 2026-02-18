@@ -1,0 +1,46 @@
+# ──────────────────────────────────────────────
+# Streamlit Dashboard Container
+# Lightweight — only dashboard dependencies, no ML frameworks
+# ──────────────────────────────────────────────
+FROM python:3.11-slim
+
+# Install minimal runtime deps
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends curl && \
+    rm -rf /var/lib/apt/lists/*
+
+# Install only dashboard dependencies (no torch/sklearn)
+RUN pip install --no-cache-dir \
+    streamlit>=1.29 \
+    plotly>=5.18 \
+    requests>=2.31 \
+    numpy>=1.24,<2.0
+
+# Create non-root user (Rule #9: security requirement)
+RUN groupadd --gid 1000 appuser && \
+    useradd --uid 1000 --gid 1000 --create-home appuser
+
+WORKDIR /app
+
+# Copy only the dashboard code
+COPY dashboard/ ./dashboard/
+
+# Own files as appuser
+RUN chown -R appuser:appuser /app
+
+# Switch to non-root user
+USER appuser
+
+# Expose Streamlit port
+EXPOSE 8501
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
+    CMD curl -f http://localhost:8501/_stcore/health || exit 1
+
+# Run Streamlit (disable CORS and XSRF for Docker networking)
+CMD ["streamlit", "run", "dashboard/app.py", \
+     "--server.port=8501", \
+     "--server.address=0.0.0.0", \
+     "--server.headless=true", \
+     "--browser.gatherUsageStats=false"]

@@ -1,0 +1,44 @@
+# ──────────────────────────────────────────────
+# Serving Configuration
+# RULE: Never hardcode these values in src/
+# ──────────────────────────────────────────────
+
+api:
+  host: "${API_HOST:-0.0.0.0}"
+  port: "${API_PORT:-8000}"
+  log_level: "${LOG_LEVEL:-INFO}"
+  workers: 1             # single worker for model in memory; scale via replicas
+  request_timeout_sec: 30
+
+# Batch endpoint limits
+batch:
+  max_batch_size: 500
+  timeout_per_item_ms: 50
+
+# Model loading
+model:
+  name: "${MODEL_NAME:-lstm_autoencoder}"
+  stage: "${MODEL_STAGE:-Production}"
+  mlflow_tracking_uri: "${MLFLOW_TRACKING_URI:-http://localhost:5000}"
+  anomaly_threshold: "${ANOMALY_THRESHOLD:-0.65}"
+
+# Database (for storing anomaly events)
+database:
+  host: "${POSTGRES_HOST:-localhost}"
+  port: "${POSTGRES_PORT:-5432}"
+  name: "${POSTGRES_DB:-anomaly_db}"
+  user: "${POSTGRES_USER:-anomaly_user}"
+  password: "${POSTGRES_PASSWORD:-changeme_in_prod}"
+
+# CORS (for Streamlit dashboard access)
+cors:
+  allow_origins:
+    - "http://localhost:8501"
+    - "http://streamlit:8501"
+  allow_methods: ["GET", "POST"]
+  allow_headers: ["*"]
+
+# Middleware
+middleware:
+  enable_timing: true
+  enable_request_logging: true

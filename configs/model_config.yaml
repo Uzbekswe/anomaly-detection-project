@@ -1,0 +1,87 @@
+# ──────────────────────────────────────────────
+# Model Configuration — All hyperparameters live here
+# RULE: Never hardcode these values in src/
+# ──────────────────────────────────────────────
+
+# Shared across all models
+data:
+  # CMAPSS FD001 sensor columns (0-indexed after unit_id, cycle)
+  # 3 operational settings + 21 sensors = 24 features total
+  operational_settings: ["op_setting_1", "op_setting_2", "op_setting_3"]
+  sensor_columns:
+    - "sensor_1"
+    - "sensor_2"
+    - "sensor_3"
+    - "sensor_4"
+    - "sensor_5"
+    - "sensor_6"
+    - "sensor_7"
+    - "sensor_8"
+    - "sensor_9"
+    - "sensor_10"
+    - "sensor_11"
+    - "sensor_12"
+    - "sensor_13"
+    - "sensor_14"
+    - "sensor_15"
+    - "sensor_16"
+    - "sensor_17"
+    - "sensor_18"
+    - "sensor_19"
+    - "sensor_20"
+    - "sensor_21"
+
+  # Sensors with near-zero variance to drop (identified in EDA)
+  drop_sensors: ["sensor_1", "sensor_5", "sensor_6", "sensor_10", "sensor_16", "sensor_18", "sensor_19"]
+
+  # After dropping, 14 sensors remain as model input features
+  # num_features is computed at runtime: len(sensor_columns) - len(drop_sensors)
+
+  # Sliding window size (timesteps)
+  window_size: 30
+
+  # Anomaly labeling: cycles with RUL below this threshold are anomalies
+  rul_anomaly_threshold: 30
+
+# ──────────────────────────────────────────────
+# Feature Engineering
+# ──────────────────────────────────────────────
+features:
+  rolling_window_sizes: [5, 10, 20]
+  rolling_statistics: ["mean", "std"]
+  normalization: "min_max"  # "min_max" | "standard"
+
+# ──────────────────────────────────────────────
+# Model 1: LSTM Autoencoder (Primary)
+# ──────────────────────────────────────────────
+lstm_autoencoder:
+  input_dim: 14          # num sensors after dropping low-variance ones
+  hidden_dim: 64
+  latent_dim: 32
+  num_layers: 2
+  dropout: 0.2
+  bidirectional: false
+
+# ──────────────────────────────────────────────
+# Model 2: Isolation Forest (Baseline)
+# ──────────────────────────────────────────────
+isolation_forest:
+  n_estimators: 200
+  contamination: 0.05    # tuned via MLflow
+  max_samples: "auto"
+  max_features: 1.0
+  random_state: 42
+
+# ──────────────────────────────────────────────
+# Model 3: PatchTST (Forecasting-Based)
+# ──────────────────────────────────────────────
+patchtst:
+  input_dim: 14          # num sensors after dropping low-variance ones
+  d_model: 64
+  n_heads: 4
+  num_encoder_layers: 3
+  d_ff: 128
+  patch_length: 8
+  stride: 4
+  dropout: 0.2
+  forecast_horizon: 10   # predict next N steps

@@ -1,0 +1,75 @@
+# ──────────────────────────────────────────────
+# Training Configuration
+# RULE: Never hardcode these values in src/
+# ──────────────────────────────────────────────
+
+# MLflow
+mlflow:
+  experiment_name: "anomaly_detection_cmapss"
+  tracking_uri: "${MLFLOW_TRACKING_URI:-http://localhost:5000}"
+  tags:
+    project: "manufacturing_anomaly_detection"
+    dataset: "cmapss_fd001"
+
+# Data split
+data:
+  test_size: 0.2
+  validation_size: 0.1
+  random_state: 42
+  shuffle: false         # time series — preserve temporal order within each unit
+
+# ──────────────────────────────────────────────
+# LSTM Autoencoder Training
+# ──────────────────────────────────────────────
+lstm_autoencoder:
+  epochs: 50
+  batch_size: 64
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  optimizer: "adam"
+  scheduler:
+    type: "reduce_on_plateau"
+    patience: 5
+    factor: 0.5
+    min_lr: 0.00001
+  early_stopping:
+    patience: 10
+    min_delta: 0.0001
+  threshold:
+    # Search range for optimal anomaly threshold (on reconstruction error)
+    search_min: 0.01
+    search_max: 1.0
+    search_steps: 100
+
+# ──────────────────────────────────────────────
+# Isolation Forest Training
+# ──────────────────────────────────────────────
+isolation_forest:
+  # Contamination values to sweep via MLflow
+  contamination_grid: [0.01, 0.02, 0.05, 0.08, 0.10, 0.15]
+
+# ──────────────────────────────────────────────
+# PatchTST Training
+# ──────────────────────────────────────────────
+patchtst:
+  epochs: 50
+  batch_size: 64
+  learning_rate: 0.0005
+  weight_decay: 0.0001
+  optimizer: "adam"
+  scheduler:
+    type: "cosine_annealing"
+    T_max: 50
+    eta_min: 0.00001
+  early_stopping:
+    patience: 10
+    min_delta: 0.0001
+  threshold:
+    search_min: 0.01
+    search_max: 1.0
+    search_steps: 100
+
+# ──────────────────────────────────────────────
+# Device
+# ──────────────────────────────────────────────
+device: "auto"  # "auto" | "cpu" | "cuda" | "mps"
