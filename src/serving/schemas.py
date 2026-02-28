@@ -6,6 +6,7 @@ Rule: All types must be explicit — no Any types.
 
 from __future__ import annotations
 
+import math
 from datetime import datetime
 
 from pydantic import BaseModel, Field, field_validator
@@ -43,9 +44,20 @@ class SensorWindow(BaseModel):
         for i, row in enumerate(v):
             if len(row) != first_len:
                 raise ValueError(
-                    f"Inconsistent sensor count: row 0 has {first_len}, "
-                    f"row {i} has {len(row)}"
+                    f"Inconsistent sensor count: row 0 has {first_len}, row {i} has {len(row)}"
                 )
+        return v
+
+    @field_validator("window")
+    @classmethod
+    def validate_window_values_finite(cls, v: list[list[float]]) -> list[list[float]]:
+        for i, row in enumerate(v):
+            for j, val in enumerate(row):
+                if not math.isfinite(val):
+                    raise ValueError(
+                        f"Non-finite value at row {i}, column {j}: {val}. "
+                        "NaN and Inf values are not allowed."
+                    )
         return v
 
 

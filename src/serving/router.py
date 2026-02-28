@@ -9,9 +9,12 @@ Endpoints:
 from __future__ import annotations
 
 import logging
+import os
 import time
+from collections import defaultdict
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.security import APIKeyHeader
 
 from src.serving.db import store_anomaly_event, store_anomaly_events_batch
 from src.serving.predictor import AnomalyPredictor
@@ -27,14 +30,50 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
+# API key authentication
+_api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+
 # Predictor instance — initialized by the app factory in main.py
 predictor: AnomalyPredictor | None = None
+
+# In-memory rate limit store: key -> list of request timestamps
+_rate_limit_store: dict[str, list[float]] = defaultdict(list)
 
 
 def set_predictor(p: AnomalyPredictor) -> None:
     """Set the global predictor instance. Called during app startup."""
     global predictor
     predictor = p
+
+
+async def api_key_auth(api_key: str | None = Depends(_api_key_header)) -> None:
+    """Validate API key. If API_KEY env var is empty/unset, auth is disabled (dev mode)."""
+    expected = os.environ.get("API_KEY", "")
+    if not expected:
+        return  # Auth disabled in dev mode
+    if not api_key or api_key != expected:
+        raise HTTPException(status_code=401, detail="Invalid or missing API key")
+
+
+def _check_rate_limit(key: str, limit: int, window: int = 60) -> None:
+    """Check and enforce a rate limit using a fixed-window counter."""
+    now = time.time()
+    _rate_limit_store[key] = [t for t in _rate_limit_store[key] if now - t < window]
+    if len(_rate_limit_store[key]) >= limit:
+        raise HTTPException(status_code=429, detail="Rate limit exceeded")
+    _rate_limit_store[key].append(now)
+
+
+async def _rate_limit_detect(request: Request) -> None:
+    """Rate limit: 60 requests/minute for /detect."""
+    client_ip = request.client.host if request.client else "unknown"
+    _check_rate_limit(f"detect:{client_ip}", limit=60)
+
+
+async def _rate_limit_batch(request: Request) -> None:
+    """Rate limit: 10 requests/minute for /detect/batch."""
+    client_ip = request.client.host if request.client else "unknown"
+    _check_rate_limit(f"batch:{client_ip}", limit=10)
 
 
 def _get_predictor() -> AnomalyPredictor:
@@ -57,8 +96,14 @@ def get_config(request: Request) -> dict:
 # ──────────────────────────────────────────────
 
 
-@router.post("/detect", response_model=PredictionResponse)
-async def detect(request_body: SensorWindow, config: dict = Depends(get_config)) -> PredictionResponse:
+@router.post(
+    "/detect",
+    response_model=PredictionResponse,
+    dependencies=[Depends(api_key_auth), Depends(_rate_limit_detect)],
+)
+async def detect(
+    request_body: SensorWindow, config: dict = Depends(get_config)
+) -> PredictionResponse:
     """Detect anomaly in a single sensor window."""
     p = _get_predictor()
 
@@ -93,8 +138,14 @@ async def detect(request_body: SensorWindow, config: dict = Depends(get_config))
 # ──────────────────────────────────────────────
 
 
-@router.post("/detect/batch", response_model=BatchDetectResponse)
-async def detect_batch(request_body: BatchDetectRequest, config: dict = Depends(get_config)) -> BatchDetectResponse:
+@router.post(
+    "/detect/batch",
+    response_model=BatchDetectResponse,
+    dependencies=[Depends(api_key_auth), Depends(_rate_limit_batch)],
+)
+async def detect_batch(
+    request_body: BatchDetectRequest, config: dict = Depends(get_config)
+) -> BatchDetectResponse:
     """Detect anomalies in a batch of sensor windows."""
     p = _get_predictor()
 
@@ -122,14 +173,16 @@ async def detect_batch(request_body: BatchDetectRequest, config: dict = Depends(
         results.append(result)
 
         if result.is_anomaly:
-            events_to_store.append({
-                "sensor_id": result.sensor_id,
-                "detected_at": result.timestamp,
-                "anomaly_score": result.anomaly_score,
-                "is_anomaly": result.is_anomaly,
-                "confidence": result.confidence,
-                "model_version": result.model_version,
-            })
+            events_to_store.append(
+                {
+                    "sensor_id": result.sensor_id,
+                    "detected_at": result.timestamp,
+                    "anomaly_score": result.anomaly_score,
+                    "is_anomaly": result.is_anomaly,
+                    "confidence": result.confidence,
+                    "model_version": result.model_version,
+                }
+            )
 
     # Persist batch to database if there are any anomalies
     if events_to_store:

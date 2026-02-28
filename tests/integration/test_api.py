@@ -15,7 +15,7 @@ from httpx import ASGITransport, AsyncClient
 
 from src.serving.middleware import RequestLoggingMiddleware, TimingMiddleware
 from src.serving.predictor import AnomalyPredictor
-from src.serving.router import router, set_predictor
+from src.serving.router import _rate_limit_store, router, set_predictor
 
 # ──────────────────────────────────────────────
 # Helpers
@@ -102,24 +102,31 @@ def mock_config() -> dict:
 
 @pytest.fixture
 async def client(mock_predictor: MagicMock, mock_config: dict) -> AsyncClient:
-    """Async httpx client for the app with a loaded model."""
+    """Async httpx client for the app with a loaded model. Auth disabled."""
+    _rate_limit_store.clear()
     app = _build_test_app(mock_config)
     set_predictor(mock_predictor)
     transport = ASGITransport(app=app)
-    with patch("src.serving.router.store_anomaly_event"), \
-         patch("src.serving.router.store_anomaly_events_batch"):
+    with (
+        patch("src.serving.router.store_anomaly_event"),
+        patch("src.serving.router.store_anomaly_events_batch"),
+        patch.dict("os.environ", {"API_KEY": ""}, clear=False),
+    ):
         async with AsyncClient(transport=transport, base_url="http://test") as ac:
             yield ac
 
 
 @pytest.fixture
 async def client_no_model(unloaded_predictor: MagicMock, mock_config: dict) -> AsyncClient:
-    """Async httpx client for the app without a loaded model."""
+    """Async httpx client for the app without a loaded model. Auth disabled."""
     app = _build_test_app(mock_config)
     set_predictor(unloaded_predictor)
     transport = ASGITransport(app=app)
-    with patch("src.serving.router.store_anomaly_event"), \
-         patch("src.serving.router.store_anomaly_events_batch"):
+    with (
+        patch("src.serving.router.store_anomaly_event"),
+        patch("src.serving.router.store_anomaly_events_batch"),
+        patch.dict("os.environ", {"API_KEY": ""}, clear=False),
+    ):
         async with AsyncClient(transport=transport, base_url="http://test") as ac:
             yield ac
 
@@ -347,7 +354,7 @@ class TestBatchDetectEndpoint:
         # Verify sensor_ids are echoed in order
         for i, result in enumerate(body["results"]):
             assert result["sensor_id"] == f"engine_{i:03d}"
-        
+
         assert mock_predictor.predict.call_count == 3
 
     @pytest.mark.asyncio
@@ -468,3 +475,107 @@ class TestContentType:
     async def test_404_for_unknown_endpoint(self, client: AsyncClient) -> None:
         resp = await client.get("/unknown")
         assert resp.status_code == 404
+
+
+# ──────────────────────────────────────────────
+# Authentication tests
+# ──────────────────────────────────────────────
+
+
+class TestAuthentication:
+    """Test API key authentication on protected endpoints."""
+
+    @pytest.fixture
+    async def auth_client(self, mock_predictor: MagicMock, mock_config: dict) -> AsyncClient:
+        """Client with API_KEY set — auth is enforced."""
+        app = _build_test_app(mock_config)
+        set_predictor(mock_predictor)
+        transport = ASGITransport(app=app)
+        with (
+            patch("src.serving.router.store_anomaly_event"),
+            patch("src.serving.router.store_anomaly_events_batch"),
+            patch.dict("os.environ", {"API_KEY": "test-secret-key"}, clear=False),
+        ):
+            async with AsyncClient(transport=transport, base_url="http://test") as ac:
+                yield ac
+
+    @pytest.mark.asyncio
+    async def test_401_without_key(self, auth_client: AsyncClient) -> None:
+        resp = await auth_client.post("/detect", json=_valid_detect_payload())
+        assert resp.status_code == 401
+
+    @pytest.mark.asyncio
+    async def test_401_with_wrong_key(self, auth_client: AsyncClient) -> None:
+        resp = await auth_client.post(
+            "/detect",
+            json=_valid_detect_payload(),
+            headers={"X-API-Key": "wrong-key"},
+        )
+        assert resp.status_code == 401
+
+    @pytest.mark.asyncio
+    async def test_200_with_correct_key(self, auth_client: AsyncClient) -> None:
+        resp = await auth_client.post(
+            "/detect",
+            json=_valid_detect_payload(),
+            headers={"X-API-Key": "test-secret-key"},
+        )
+        assert resp.status_code == 200
+
+    @pytest.mark.asyncio
+    async def test_health_unauthenticated(self, auth_client: AsyncClient) -> None:
+        """Health endpoint should not require authentication."""
+        resp = await auth_client.get("/health")
+        assert resp.status_code == 200
+
+
+# ──────────────────────────────────────────────
+# NaN / Inf validation tests
+# ──────────────────────────────────────────────
+
+
+class TestNaNInfValidation:
+    """Test that NaN/Inf values are rejected by schema validation.
+
+    NaN/Inf are not valid JSON per RFC 7159, so these are tested at the schema
+    level (unit tests) rather than through HTTP. See tests/unit/test_schemas.py
+    for the SensorWindow.validate_window_values_finite validator tests.
+    Standard JSON clients cannot send NaN/Inf; this validator provides
+    defense-in-depth for non-standard parsers.
+    """
+
+    def test_nan_rejected_by_schema(self) -> None:
+        from pydantic import ValidationError
+
+        from src.serving.schemas import SensorWindow
+
+        with pytest.raises(ValidationError, match="Non-finite value"):
+            SensorWindow(
+                sensor_id="engine_001",
+                window=[[0.5, float("nan")], [0.6, 0.7]],
+                timestamp="2024-01-15T09:23:11Z",
+            )
+
+    def test_inf_rejected_by_schema(self) -> None:
+        from pydantic import ValidationError
+
+        from src.serving.schemas import SensorWindow
+
+        with pytest.raises(ValidationError, match="Non-finite value"):
+            SensorWindow(
+                sensor_id="engine_001",
+                window=[[0.5, float("inf")], [0.6, 0.7]],
+                timestamp="2024-01-15T09:23:11Z",
+            )
+
+    def test_negative_inf_rejected_by_schema(self) -> None:
+        from pydantic import ValidationError
+
+        from src.serving.schemas import SensorWindow
+
+        with pytest.raises(ValidationError, match="Non-finite value"):
+            SensorWindow(
+                sensor_id="engine_001",
+                window=[[0.5, float("-inf")], [0.6, 0.7]],
+                timestamp="2024-01-15T09:23:11Z",
+            )

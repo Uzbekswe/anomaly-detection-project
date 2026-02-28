@@ -14,6 +14,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from src.serving.config_utils import load_serving_config
 from src.serving.db import close_pool as close_db_pool
 from src.serving.middleware import RequestLoggingMiddleware, TimingMiddleware
 from src.serving.predictor import (
@@ -23,7 +24,6 @@ from src.serving.predictor import (
     load_model_from_run,
 )
 from src.serving.router import router, set_predictor
-from src.serving.config_utils import load_serving_config
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +36,7 @@ async def lifespan(app: FastAPI):
     """Application lifespan: load model on startup, cleanup on shutdown."""
     # Startup
     logger.info("Starting anomaly detection service...")
-    
+
     config = load_serving_config(SERVING_CONFIG_PATH)
     model_name = config["model"]["name"]
     model_stage = config["model"]["stage"]
@@ -53,9 +53,15 @@ async def lifespan(app: FastAPI):
             model_container = load_model_from_local(model_name)
             predictor = AnomalyPredictor(model_container)
             set_predictor(predictor)
-            logger.info("Model loaded from local artifacts: %s", predictor.model_container.model_version)
+            logger.info(
+                "Model loaded from local artifacts: %s", predictor.model_container.model_version
+            )
         except Exception as local_err:
-            logger.error("Local artifact loading also failed: %s. Service starts without model.", local_err, exc_info=True)
+            logger.error(
+                "Local artifact loading also failed: %s. Service starts without model.",
+                local_err,
+                exc_info=True,
+            )
             set_predictor(AnomalyPredictor(None))
 
     yield
@@ -77,7 +83,7 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
     app.state.config = config
-    
+
     # Configure logging
     log_level = api_config.get("log_level", "INFO").upper()
     logging.basicConfig(
@@ -89,10 +95,10 @@ def create_app() -> FastAPI:
     cors_config = config.get("cors", {})
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=cors_config.get("allow_origins", ["*"]),
+        allow_origins=cors_config.get("allow_origins", []),
         allow_credentials=True,
         allow_methods=cors_config.get("allow_methods", ["GET", "POST"]),
-        allow_headers=cors_config.get("allow_headers", ["*"]),
+        allow_headers=cors_config.get("allow_headers", []),
     )
 
     # Custom middleware
@@ -123,7 +129,7 @@ app = create_app()
 
 if __name__ == "__main__":
     import uvicorn
-    
+
     # This block is for local development only
     config = load_serving_config(SERVING_CONFIG_PATH)
     api_config = config.get("api", {})

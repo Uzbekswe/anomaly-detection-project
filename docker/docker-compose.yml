@@ -30,7 +30,7 @@ services:
 
   # ── MLflow — Experiment tracking UI ──
   mlflow:
-    image: ghcr.io/mlflow/mlflow
+    image: ghcr.io/mlflow/mlflow:v2.9.1
     container_name: anomaly-mlflow
     command: >
       mlflow server
@@ -67,6 +67,7 @@ services:
       API_PORT: "8000"
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       MAX_BATCH_SIZE: ${MAX_BATCH_SIZE:-500}
+      API_KEY: ${API_KEY:-}
       MLFLOW_ARTIFACT_URI: file:///tmp/mlruns
     ports:
       - "8000:8000"
