@@ -121,8 +121,8 @@ graph LR
         OUT --> DIFF
         DIFF --> SCORE[Reconstruction Error]
         SCORE --> THR{Score > Threshold?}
-        THR -->|Yes| ANOM[🔴 Anomaly]
-        THR -->|No| NORM[🟢 Normal]
+        THR -->|Yes| ANOM["🔴 Anomaly"]
+        THR -->|No| NORM["🟢 Normal"]
     end
 
     style BN fill:#e8f5e9,stroke:#2e7d32
@@ -146,8 +146,8 @@ graph TD
 
     AVG --> SCORE[Anomaly Score<br/>Short path = anomaly]
     SCORE --> THR{Score > Threshold?}
-    THR -->|Yes| ANOM[🔴 Anomaly]
-    THR -->|No| NORM[🟢 Normal]
+    THR -->|Yes| ANOM["🔴 Anomaly"]
+    THR -->|No| NORM["🟢 Normal"]
 
     style SCORE fill:#fff9c4,stroke:#f9a825
 ```
@@ -243,9 +243,9 @@ graph TB
         VAL -->|Valid| ROUTER[Router]
         VAL -->|Invalid| E422[422 Error]
 
-        ROUTER --> DETECT[/detect]
-        ROUTER --> BATCH[/detect/batch]
-        ROUTER --> HEALTH[/health]
+        ROUTER --> DETECT["/detect"]
+        ROUTER --> BATCH["/detect/batch"]
+        ROUTER --> HEALTH["/health"]
 
         DETECT --> PRED[AnomalyPredictor]
         BATCH --> PRED
@@ -303,7 +303,7 @@ sequenceDiagram
 
 ```mermaid
 graph TB
-    subgraph Docker Compose — anomaly-net
+    subgraph DockerCompose["Docker Compose - anomaly-net"]
         PG[(PostgreSQL 15<br/>:5432<br/>anomaly_events)]
         ML[MLflow Server<br/>:5000<br/>Experiment UI]
         API[FastAPI<br/>:8000<br/>Model Serving]
